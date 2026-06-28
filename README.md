@@ -54,6 +54,8 @@ main ───── 设计文档（冻结，受保护）
 - **feat/xxx**：功能分支，从 `develop` 切出，完成后 PR 到 `develop`。
 - **fix/xxx**：修复分支，同上。
 
+> 完整工作流（从 Issue 到 PR 合入）见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
 ### 当前进度
 
 | 阶段 | 状态 | 产出 |
