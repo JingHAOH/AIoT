@@ -1,0 +1,29 @@
+name: 功能实现
+description: 实现设计文档中定义的模块/类型/服务
+title: "[feat] "
+labels: [enhancement]
+body:
+  - type: textarea
+    attributes:
+      label: 关联设计文档
+      description: 指明本任务对应的设计文档及章节/类型
+      placeholder: |
+        docs/ood_domain.md §3.1 AR-01 Trip 聚合根
+        docs/ood_application.md §3 IRiskMonitoringService
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 任务描述
+      description: 要做什么
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 验收标准
+      description: 完成的标准是什么
+      placeholder: |
+        - [ ] Trip.java 包含 DrivingBehaviorCounters / TripScore / L3DurationTracker
+        - [ ] 通过单元测试
+    validations:
+      required: true

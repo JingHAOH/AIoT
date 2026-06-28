@@ -1,0 +1,30 @@
+name: Bug 修复
+description: 报告代码或文档中的问题
+title: "[fix] "
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: 问题描述
+      description: 发生了什么问题
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 复现步骤
+      description: 如何触发该问题
+    validations:
+      required: false
+  - type: textarea
+    attributes:
+      label: 期望行为
+      description: 预期应该怎样
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 关联设计文档
+      description: 问题涉及的章节
+      placeholder: docs/ood_domain.md §3.3 VO-05
+    validations:
+      required: false
