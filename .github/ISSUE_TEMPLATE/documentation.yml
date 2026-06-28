@@ -1,0 +1,29 @@
+name: 文档变更
+description: 新增或修改设计文档、README、贡献指南等
+title: "[docs] "
+labels: [documentation]
+body:
+  - type: dropdown
+    attributes:
+      label: 变更类型
+      options:
+        - 新增文档
+        - 修改已有文档
+        - 修复文档错误
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 涉及文件
+      description: 要新增或修改的文件路径
+      placeholder: |
+        docs/ood_domain.md
+        CONTRIBUTING.md
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 变更说明
+      description: 具体要改什么、为什么
+    validations:
+      required: true
