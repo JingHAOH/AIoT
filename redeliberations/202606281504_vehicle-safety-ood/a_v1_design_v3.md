@@ -1,0 +1,757 @@
+# 车载安全监测系统 领域层 OOD 设计方案（v3）
+
+> 本文档为「智能物联——基于多传感器融合的车载安全监测系统」的架构级 OOD 设计方案，采用 DDD（领域驱动设计）分层思想，聚焦领域层的实体、值对象、聚合根、领域服务和领域事件设计。设计目标语言为仓颉（Cangjie），方案在仓颉类型系统能力范围内做抽象，不涉及具体代码实现。
+
+---
+
+## 一、概述
+
+### 设计目标
+
+本系统领域层的核心使命是：**接收多维传感器感知输入，基于业务规则执行融合风险判定，按风险等级驱动分级干预与通知，同时支撑远程监护、车队管理及应急救援等协作场景**。
+
+设计遵循以下目标：
+
+- **安全优先**：边缘侧本地兜底的核心判定链路不可降级，断网时安全告警链路仍成立。
+- **职责内聚**：感知、判定、干预、通知、管理各自归属清晰的领域模块，模块间通过领域事件解耦。
+- **隐私内建**：原始敏感数据（人脸图像、语音存证）的存储边界与脱敏要求直接体现在领域对象的设计约束中。
+- **可验收导向**：本期设计聚焦软件判定逻辑与控制指令的正确性，不依赖真实硬件/算法，所有领域逻辑在模拟数据下可复现验证。
+
+### 核心抽象层次
+
+系统在领域层分为四个抽象层次：
+
+1. **聚合根** — 事务一致性边界，统领一组关联实体与值对象，外部只能通过聚合根访问其内部对象。
+2. **实体** — 有唯一标识、有生命周期的领域对象，其相等性由标识决定。
+3. **值对象** — 无独立标识、由属性值定义相等性的不可变领域概念。
+4. **领域服务** — 无状态的操作抽象，封装不属于任何单一聚合根的业务规则与协调逻辑。
+
+---
+
+## 二、模块划分
+
+系统领域层按职责拆分为以下模块，模块间依赖方向为单向——上层模块可依赖下层模块，下层不可反向依赖上层。
+
+### 2.1 模块一览
+
+| 模块 | 职责 | 依赖方向 |
+|------|------|----------|
+| `domain.model` | 核心领域对象：实体、值对象、聚合根的纯数据结构定义，不含业务逻辑 | 无外部依赖 |
+| `domain.risk` | 风险判定领域服务，含两类调用模型：①**流式融合判定门面**（RiskDeterminationService + 子服务 BR-01 疲劳、BR-03 路怒、分心检出）处理持续到达的 DMS/生理/语音流式感知；②**事件触发型独立判定服务**（BR-02 活体遗留、BR-06 碰撞失能），由各自的领域事件触发、独立产出领域事件，不经门面汇总；以及三级风险等级的统一映射 | 依赖 `domain.model`、`domain.event` |
+| `domain.intervention` | 干预与反馈领域服务：分级指令生成、HMI 反馈控制、CAN 标准指令下发逻辑、驾驶员覆盖检测 | 依赖 `domain.model`、`domain.event` |
+| `domain.family` | 远程监护领域服务：家属权限管理（BR-07）、家属端自动激活接入（高危场景）、远程对讲/视频/车窗控制授权 | 依赖 `domain.model`、`domain.event` |
+| `domain.fleet` | 车队运营管理领域服务：看板聚合查询、钻取查询、驾驶评分（BR-05）、报告生成、绩效预警推送 | 依赖 `domain.model`、`domain.event` |
+| `domain.emergency` | 应急救援领域服务：SOS 自动呼叫、车辆状态共享、远程解锁授权、健康档案调取 | 依赖 `domain.model`、`domain.event` |
+| `domain.privacy` | 隐私保护领域服务：BR-04 脱敏边界约束、数据授权校验、路怒语音存证的生命周期管理 | 依赖 `domain.model`、`domain.event` |
+| `domain.ota` | OTA 升级管理领域服务：版本管理、升级包下发、断点续传、完整性校验、失败回滚、静默升级状态机 | 依赖 `domain.model`、`domain.event` |
+| `domain.monitor` | 系统自检领域服务：BR-08 传感器故障检测、监测脱线标记、失效告警 | 依赖 `domain.model`、`domain.event` |
+| `domain.event` | 领域事件定义：系统中所有领域事件的类型与载体，供各模块间解耦通信 | 仅依赖 `domain.model` 中的标识类型 |
+
+### 2.2 依赖原则
+
+- `domain.model` 是最底层，不依赖任何其他模块。
+- `domain.event` 仅依赖 `domain.model` 中的标识类型（如司机 ID、行程 ID），不依赖聚合根内部结构。
+- 各领域服务模块之间**禁止直接调用**，跨模块协作统一通过领域事件完成。
+- 各模块**允许同时依赖** `domain.model` 和 `domain.event`。
+
+---
+
+## 三、核心抽象
+
+### 3.1 聚合根
+
+#### AR-01：Trip（行驶行程）
+
+**角色与职责**：系统的核心聚合根，代表一次从点火到熄火的完整行驶行程。Trip 是数据汇聚与告警生成的枢纽——它持有该行程中产生的所有生理体征快照，并负责在该行程生命期内产出的安全告警事件建立关联。Trip 不直接执行风险判定（由领域服务完成），但它是判定结果与干预指令的作用上下文。
+
+**类型形态**：`class`（聚合根）。Trip 具有独立的生命周期（点火创建、熄火终结）和唯一标识（行程 ID），其内部一致性需要事务边界保护，因此是聚合根而非普通实体。
+
+**协作关系**：
+- 与 Driver、Vehicle 是一对多归属关系（一个 Trip 属于一个 Driver 和一个 Vehicle），Trip 通过标识引用它们。
+- 内部持有 PhysiologicalSnapshot 值对象集合（快照不可变，新增即追加）。
+- 产出 SafetyAlertEvent，事件归属 Trip 但可独立于 Trip 生命周期存在。
+- 领域服务 RiskDeterminationService 以 Trip 为判定上下文，判定结果写入 Trip 关联的告警列表。
+- 领域服务 ScoringService 在行程结束时计算 TripScore，数值以值对象形式存入 Trip。
+
+---
+
+#### AR-02：Driver（驾驶员）
+
+**角色与职责**：代表被监测的驾驶员，是被监护的主体。Driver 聚合管理驾驶员的基础身份信息、脱敏人脸特征向量、生理健康基准、综合风险评分，以及与其 1:1 绑定的健康档案（DriverHealthProfile）。Driver 不持有行程列表（行程独立为聚合根），仅通过标识关联。
+
+**类型形态**：`class`（聚合根）。Driver 拥有唯一标识（驾驶员 ID），其生命周期独立于行程与车辆（换车、换行程不影响 Driver 身份），且内部 DriverHealthProfile 需要通过 Driver 聚合根才能访问和修改，符合聚合根的事务一致性边界。
+
+**协作关系**：
+- 与 Vehicle 通过 Trip 间接关联。
+- 内部持有 DriverHealthProfile 实体（1:1）。
+- 与 SystemAccount（家属角色）是多对多监护关系，监护关系的变更通过领域事件通知。
+- 接收 PerformanceWarningEvent（当评分 < 60 时），但不直接消费，由通知模块路由给管理员。
+
+---
+
+#### AR-03：Vehicle（车辆）
+
+**角色与职责**：代表搭载监测终端的物理车辆资产。Vehicle 聚合管理车辆标识（车牌号、VIN）、终端序列号、传感器自检状态（在线/离线/故障），以及当前监测脱线标记（BR-08）。Vehicle 不负责判定逻辑，但为判定引擎提供设备状态上下文。
+
+**类型形态**：`class`（聚合根）。Vehicle 有唯一标识（VIN/终端序列号），其生命周期独立于行程和驾驶员，设备状态需要以事务一致性方式更新（如一次自检结果需原子性覆盖多个传感器的状态），因此适合作为聚合根。
+
+**协作关系**：
+- 与 Driver 通过 Trip 间接关联。
+- 传感器自检状态由领域服务 SensorSelfCheckService 更新，故障时触发 SensorFailureEvent。
+- 与管理员角色的 SystemAccount 是管理关系。
+
+---
+
+#### AR-04：SystemAccount（系统账户）
+
+**角色与职责**：代表外部监护与管理主体——家属（FAMILY）或车队管理员（MANAGER）。SystemAccount 聚合管理账户标识、联系方式、角色、通知权限和监护/管理范围。不同角色拥有不同的数据访问和操作权限。
+
+**类型形态**：`class`（聚合根）。SystemAccount 拥有唯一标识（账号 ID）和独立生命周期，角色变更、权限授予等操作需要事务一致性，因此是聚合根。
+
+**协作关系**：
+- 家属角色：与 Driver 存在监护关系，权限受 Permission 值对象约束（BR-07）。
+- 管理员角色：拥有全局统计权限，接收车队级告警与绩效预警。
+- 接收 SafetyAlertEvent 并根据权限和通知偏好决定是否推送。
+
+---
+
+### 3.2 实体（非聚合根）
+
+#### E-01：SafetyAlertEvent（安全告警事件）
+
+**角色与职责**：满足判定规则时生成的异常记录，是系统告警链路的统一载体。它记录告警类型（疲劳/分心/路怒/活体遗留/碰撞失能/绩效预警）、风险等级（L1/L2/L3）、发生时间、GPS 位置和异常特征快照。告警事件一旦生成即不可修改（只追加），其生命周期独立于 Trip。
+
+**类型形态**：`class`（实体）。SafetyAlertEvent 有唯一标识（告警 ID），可独立于 Trip 被查询、推送和归档，它在数据库中可能有自己的存储表，因此是实体而非值对象。它不设计为聚合根，因为：告警事件的生成总是以 Trip 为上下文（绩效预警除外，以评分计算为上下文），通过 Trip 聚合根的一致性边界来关联。
+
+**协作关系**：
+- 关联到一个 Trip（绩效预警关联到一次评分计算上下文）。
+- 触发时生成 AlertTriggeredEvent 领域事件，由通知模块消费。
+- 路怒类型的告警事件与 RoadRageVoiceRecord 存在 1:1 关联。
+
+> **设计约束**：SafetyAlertEvent 作为聚合内实体与"独立查询"需求之间存在张力。设计层面采用 **CQRS 读模型投影**策略倾向——写侧仍通过 Trip 聚合根访问 SafetyAlertEvent 以保证事务一致性；读侧（车队管理员跨行程查询告警历史、看板聚合）通过独立的只读投影或物化视图完成，不穿透聚合根边界加载。实现时可将告警写入主存储后异步投射至读模型。
+
+---
+
+#### E-02：RoadRageVoiceRecord（路怒语音存证）
+
+**角色与职责**：路怒告警成立时生成的语音留存记录，存储于车载边缘侧。它封装了录制起止时间、加密音频引用、脱敏标记和保留到期时间。其生命周期受保留策略约束——到期后自动清除。
+
+**类型形态**：`class`（实体）。RoadRageVoiceRecord 有唯一标识（存证 ID），有独立的生命周期（创建→到期→清除），因此是实体。不设计为聚合根，因为它 1:1 关联到一个 SafetyAlertEvent（路怒类型），其创建和清除与告警事件紧密耦合，通过告警事件的一致性边界管理更自然。
+
+**协作关系**：
+- 1:1 关联路怒类型的 SafetyAlertEvent。
+- 默认不上云、不外传，仅通过 PrivacyProtectionService 在授权审计场景下访问。
+- 到期清除由 PrivacyProtectionService 按预设周期执行。
+
+---
+
+#### E-03：DriverHealthProfile（驾驶员健康档案）
+
+**角色与职责**：与实时生理快照区分的档案级对象，包含血型、过敏史、慢性病史、用药史、基础生命体征基线和紧急医疗联系人等。仅在 SOS/救援授权场景下、经权限校验后可被救援机构调取。
+
+**类型形态**：`class`（实体）。DriverHealthProfile 有独立的存储模型和业务含义，与实时监测数据（PhysiologicalSnapshot）是不同粒度和访问约束的数据，但其生命周期完全依附于 Driver——一个 Driver 仅有一份档案，档案的修改须通过 Driver 聚合根操作。因此它是 Driver 聚合根内部的实体，而非独立聚合根。
+
+**协作关系**：
+- 与 Driver 是 1:1 聚合内包含关系。
+- 由 EmergencyRescueService 在救援场景下经权限校验后调取。
+
+---
+
+### 3.3 值对象
+
+#### VO-01：RiskLevel（风险等级）
+
+**角色与职责**：统一的三级风险等级标签，贯穿系统所有判定和干预逻辑。
+
+**类型形态**：`enum`。风险等级是有限、固定的三个取值（L1_HINT / L2_WARNING / L3_CRITICAL），且不同等级对应不同的干预策略分支，使用枚举可确保类型安全和编译期穷尽检查。
+
+---
+
+#### VO-02：AlertType（告警类型）
+
+**角色与职责**：标识告警的种类，驱动通知路由和干预策略选择。
+
+**类型形态**：`enum`。告警类型集合是有限的、稳定的（FATIGUE / DISTRACTION / ROAD_RAGE / LIFE_DETECTION / COLLISION_DISABILITY / PERFORMANCE_WARNING），使用枚举确保各模块对类型的引用保持一致。
+
+> **取值来源边界（消除重复判定事件）**：AlertType 是 **SafetyAlertEvent（告警实体）** 的完整分类维度，覆盖以上全部取值。但各**判定事件**仅携带其中互不重叠的子集：`RiskDeterminedEvent` 仅携带流式融合判定子集 `{FATIGUE, DISTRACTION, ROAD_RAGE}`；`LIFE_DETECTION` 仅由 `LifeDetectedEvent`（DS-05 独立产出）承载；`COLLISION_DISABILITY` 仅由 `EmergencyActivatedEvent`（DS-06 独立产出）承载。三类判定事件的 AlertType 取值集合两两不相交，因此同一判定结果**不会同时产出两条判定事件**（如 LifeDetectedEvent 与一条 AlertType=LIFE_DETECTION 的 RiskDeterminedEvent），从根上消除了重复事件歧义。`PERFORMANCE_WARNING` 则由 `PerformanceWarningEvent`（DS-09）承载，属离线评分触发，亦不与上述判定事件重叠。
+
+---
+
+#### VO-03：PhysiologicalSnapshot（生理体征快照）
+
+**角色与职责**：传感器按固定频率采集的瞬时生理数据，是一个不可变的时间点数据切片。包含采集时间戳、实时心率、血氧饱和度、情绪指数。
+
+**类型形态**：`struct`（值对象）。PhysiologicalSnapshot 没有独立标识，其相等性由属性值决定（同一时间点的相同读数为同一快照）。它被 Trip 聚合根持有为集合，新增即追加，不修改已有快照。设计为值对象可避免快照被修改导致的并发一致性问题。
+
+> **仓颉类型约束**：仓颉中 `struct` 为值类型（值相等语义），天然契合值对象的相等性定义，是值对象的首选类型形态。若因具体实现约束必须使用 `class`（引用类型），则需重写相等性方法以满足值相等语义。
+
+**协作关系**：
+- 被 Trip 聚合根持有为不可变集合。
+- 作为 RiskDeterminationService 的输入数据。
+- 不独立持久化，随 Trip 聚合根统一存储。
+
+---
+
+#### VO-04：GeoLocation（地理位置）
+
+**角色与职责**：GPS/北斗坐标信息，用于告警定位、热力图展示和救援定位。
+
+**类型形态**：`struct`（值对象）。经纬度坐标对由值定义相等性，无独立标识，是不可变的值对象。
+
+---
+
+#### VO-05：TripScore（行程评分）
+
+**角色与职责**：驾驶行为评分值，范围 [0, 100]，按 BR-05 公式计算。行程级评分和周期级评分使用同一值对象类型，区别仅在于计算上下文。
+
+**类型形态**：`struct`（值对象）。评分是一个纯数值概念，由值定义相等性。设计为值对象而非裸数值的理由：评分需要携带 clamp 至 [0,100] 的不变式约束，值对象的构造器可确保非法值（如负数、>100）无法被创建。
+
+---
+
+#### VO-06：SensorStatus（传感器状态）
+
+**角色与职责**：描述单个传感器或设备通道的健康状态（在线/离线/故障），供 BR-08 失效保护逻辑使用。
+
+**类型形态**：`enum`。状态集合有限且互斥（ONLINE / OFFLINE / FAULT），使用枚举便于模式匹配和类型安全的状态机转换。
+
+---
+
+#### VO-07：Permission（访问权限）
+
+**角色与职责**：描述家属账户对某驾驶员的授权级别，决定可执行哪些远程操作（查看状态、对讲、视频、车窗控制）。BR-07 的"60 秒持续 L3 后授权"和"高危场景自动激活"是权限授予的两种路径，而非权限类型本身。
+
+**类型形态**：`struct`（值对象）。权限由一组可执行操作的集合定义，不同账户获得的权限实例不同，但权限本身由操作集合的值定义相等性。不可变，修改权限意味着创建新的 Permission 实例。
+
+---
+
+#### VO-08：OTAVersion（固件版本）
+
+**角色与职责**：描述车载终端固件的版本号、适用车型范围和升级包摘要信息。
+
+**类型形态**：`struct`（值对象）。版本号由值定义相等性（同一版本号即同一版本），不可变。用于 OTA 升级管理中的版本比对和兼容性校验。
+
+---
+
+#### VO-09：VehicleStateSnapshot（车辆状态快照）
+
+**角色与职责**：事故前 30 秒或特定时刻的车辆状态摘要，包含车速、加速度、车门锁状态、起火风险标志、燃油泄漏标志等。用于 BR-06 应急救援上报。
+
+**类型形态**：`struct`（值对象）。快照是一个时间点的不可变状态切面，由属性值定义相等性，无独立标识。
+
+> **生产者与缓存归属（消除"快照从何而来"的不确定性）**：BR-06 要求在碰撞时刻回取**事故前 30 秒**的车辆状态，意味着系统必须在碰撞发生**之前**就持续采集并缓存近期车辆状态。该"持续采样 + 滚动缓存"职责**不属于任何领域服务**（领域服务保持无状态、按需触发），而是一个**基础设施层职责**：由边缘侧的车辆状态采集组件按固定频率生成 VehicleStateSnapshot，并维护一个覆盖至少 30s 时间窗的**滚动缓冲（ring buffer）**。领域层仅声明一个依赖接口 **VehicleStateBuffer**（端口），暴露"按时间窗回取快照序列"的能力契约；EmergencyResponseService（DS-06）在碰撞时刻通过该端口回取事故前 30s 窗内的快照。该端口由基础设施层实现（见决策 14），从而将"有状态的持续缓存"与"无状态的领域判定"清晰分离。
+
+---
+
+#### VO-10：TimeRange（时间范围）
+
+**角色与职责**：表示一段连续的时间区间（起止时间戳），用于报告查询的周期约束。
+
+**类型形态**：`struct`（值对象）。时间区间由起止值定义相等性，不可变。需确保起始时间不晚于结束时间的不变式。
+
+---
+
+#### VO-11：SensorReading（传感器读数）
+
+**角色与职责**：四大感知通道（DMS 视觉、生理体征、语音情绪、毫米波雷达）的**统一感知数据抽象**。封装感知通道类型、采集时间戳、通道级原始载荷引用和已提取的特征向量。为各判定服务提供统一的输入契约，避免各判定服务以松散的自然语言描述各自理解输入格式。
+
+**类型形态**：`struct`（值对象）。SensorReading 是一个不可变的感知数据切片，无独立标识，由通道类型、时间戳和特征向量的组合值定义相等性。
+
+**协作关系**：
+- 由感知采集层（基础设施层）按固定频率生成并送入领域层。
+- 作为 RiskDeterminationService 及其子判定服务的统一输入。
+- 本身不持久化在领域模型中，由 Trip 聚合中的 PhysiologicalSnapshot 和 VehicleStateSnapshot 等提取所需维度后独立存储。
+
+---
+
+### 3.4 领域服务
+
+#### DS-01：RiskDeterminationService（风险判定服务）
+
+**职责**：作为**流式感知融合判定的门面**，接收持续到达的流式感知通道统一输入（SensorReading），按 BR-01 疲劳、BR-03 路怒、分心检出规则执行融合判定，输出统一的 RiskLevel 和 AlertType（取值限定于 `{FATIGUE, DISTRACTION, ROAD_RAGE}` 子集）。它是边缘侧流式判定链路的入口——在边缘本地完成轻量判定以保证 500ms 端到端时延和断网可用性。云端承担更重的多维融合行为风控建模，但那是云侧服务而非本领域服务范畴。
+
+> **判定模型边界（与 DS-05/DS-06 的关系）**：本门面只负责**持续流式数据驱动**的判定（DMS 视觉、生理、语音三条持续到达的感知流）。BR-02 活体遗留与 BR-06 碰撞失能属于**事件触发型判定**——其触发源是离散的领域事件（熄火落锁、碰撞冲击），判定逻辑、生命周期与产出事件均不同于流式融合，故由 LifeDetectionService（DS-05）与 EmergencyResponseService（DS-06）作为**独立领域服务**承担，**不纳入本门面的委托列表**（见决策 2、决策 13）。
+
+**协作**：
+- 输入：多条流式 SensorReading（分别来自 DMS 视觉、生理体征、语音情绪通道）。生理通道同时也被 EmergencyResponseService 用于失能判定，毫米波雷达通道被 LifeDetectionService 使用，加速度通道被 EmergencyResponseService 使用——这些通道由感知分发层按消费方路由，不流经本门面。
+- 内部委托：将各通道数据分派给 FatigueDeterminationService、DistractionDetectionService、RoadRageDeterminationService 各自判定。
+- 汇总各子判定服务的判定结果，产出 RiskDeterminedEvent（携带 RiskLevel 和 AlertType ∈ `{FATIGUE, DISTRACTION, ROAD_RAGE}`），驱动干预模块和通知模块。
+- 门面职责：子判定服务不直接产出领域事件，也不直接调用其他模块的领域服务。各子判定服务仅将判定结果返回给 RiskDeterminationService，由门面统一产出 RiskDeterminedEvent。跨模块协作（如路怒成立触发语音存证、环境调节）由消费方订阅 RiskDeterminedEvent 完成，而非在子判定服务中直接调用。
+
+**为何是领域服务**：风险判定操作跨越多个聚合（Trip、Driver、Vehicle），不属于任何单一聚合的行为，且判定过程是无状态的——给定相同的输入，判定结果确定。
+
+---
+
+#### DS-02：FatigueDeterminationService（疲劳判定服务 — BR-01）
+
+**职责**：依据 DMS 视觉数据执行疲劳分级：轻度疲劳（L2）与重度疲劳（L3）。判定条件如 BR-01 所述——连续 3 分钟内频繁眨眼或视线偏离累计 >15s → L2；眼睑闭合 >1.5s 或点头频率 >2 次/10s → L3。
+
+**协作**：被 RiskDeterminationService 委托调用。输出疲劳等级和判定依据快照，**仅返回给门面，不自行产出领域事件或调用其他模块**。
+
+---
+
+#### DS-03：DistractionDetectionService（分心检出服务）
+
+**职责**：依据 DMS 视觉数据判定分心行为——视线偏离前方持续/累计达 3 秒即判定为分心成立（L2），判定成立后须在 0.5 秒内发出告警。
+
+**协作**：被 RiskDeterminationService 委托调用。输出分心标志和判定时间戳，**仅返回给门面，不自行产出领域事件或调用其他模块**。
+
+---
+
+#### DS-04：RoadRageDeterminationService（路怒判定服务 — BR-03）
+
+**职责**：融合语音情绪特征（声压级 >85dB + 谩骂关键词）和生理特征（心率较静息上升 20%+）判定路怒状态（L2）。
+
+**协作**：
+- 被 RiskDeterminationService 委托调用。
+- 判定成立时，将判定结果（含 AlertType=ROAD_RAGE 及判定依据快照）**返回给 RiskDeterminationService 门面**，不直接调用任何其他模块的领域服务。
+- RiskDeterminationService 汇总后产出 RiskDeterminedEvent（携带 AlertType=ROAD_RAGE），由以下消费方各自订阅处理：
+  - **PrivacyProtectionService**（`domain.privacy`）消费 RiskDeterminedEvent（AlertType=ROAD_RAGE），触发路怒语音存证录制。
+  - **InterventionService**（`domain.intervention`）消费 RiskDeterminedEvent（AlertType=ROAD_RAGE），触发车内环境调节指令（空调调低 2°C + 白噪音/舒缓音乐）。
+
+---
+
+#### DS-05：LifeDetectionService（活体遗留检测服务 — BR-02，**独立事件触发型领域服务**）
+
+**职责**：本服务是**独立的事件触发型判定服务**，**不属于 RiskDeterminationService 门面的委托子服务**（见决策 2、决策 13）。其触发源是离散的"熄火且车门落锁"事件（而非持续到达的流式感知），触发后接收毫米波雷达扫描信号，在 60 秒判定窗口内持续监测呼吸/移动微动。若判定窗口内持续感应到微动，判定为遗留生命风险（L3，AlertType=LIFE_DETECTION）。判定成立后，须在 10 秒内**直接产出** LifeDetectedEvent 驱动告警推送（家属 APP 红色高频振动报警 + 车辆双闪 + 短促鸣笛），其产出路径**不经过 RiskDeterminationService 汇总**，因此不会与门面产生重复的判定事件。
+
+**协作**：
+- 触发：订阅"熄火落锁"事件（由车辆状态变更产生），据此启动一次判定窗口。
+- 输入：毫米波雷达活体信号（按消费方路由直送本服务，不流经融合门面）。
+- 输出：LifeDetectedEvent（携带 Vehicle 标识、判定置信度、时间戳）；告警落库时生成 AlertType=LIFE_DETECTION 的 SafetyAlertEvent。
+
+> **设计约束（判定窗口状态边界澄清）**：判定窗口（60s 倒计时）是本服务在一次活体监测会话内的**会话级临时状态**，而非领域服务的持久成员状态。设计层面明确其归属为：将窗口的剩余时长、起始时刻、累计微动观测等封装为独立的 **`DetectionWindow` 值对象**，由调用上下文（边缘侧的活体监测会话）持有并在每次雷达信号到达时作为**输入参数**传入本服务、由本服务返回**更新后的 `DetectionWindow` 与判定结论**。如此本服务对外仍是**纯函数**（输入 = 当前 DetectionWindow + 新雷达信号，输出 = 新 DetectionWindow + 可选 LifeDetectedEvent），窗口的可变状态由会话上下文管理而非服务内部 mutable 字段，消除了对可测试性的影响。边缘侧单线程运行环境（见 §6.1）进一步保证该会话状态无并发竞争。
+
+---
+
+#### DS-06：EmergencyResponseService（应急响应服务 — BR-06，**独立事件触发型领域服务**）
+
+**职责**：本服务是**独立的事件触发型判定服务**，**不属于 RiskDeterminationService 门面的委托子服务**（见决策 2、决策 13）。其触发源是离散的"碰撞特征冲击"信号（而非持续流式感知）。当加速度传感器检测到碰撞冲击，且生理监测显示心率骤停或意识丧失 >10 秒时，跳过人工确认，立即**直接产出** EmergencyActivatedEvent（L3，AlertType=COLLISION_DISABILITY），驱动救援上报与家属端自动激活；其产出路径**不经过 RiskDeterminationService 汇总**，不会与门面产生重复判定事件。
+
+**协作**：
+- 触发：碰撞冲击信号（加速度通道按消费方路由直送本服务，不流经融合门面）+ 生理特征（共享生理通道）。
+- 事故前 30 秒 VehicleStateSnapshot 的获取：本服务**不负责持续采集与缓存**车辆状态；它在碰撞时刻通过一个由基础设施层实现的**车辆状态滚动缓冲端口**（VehicleStateBuffer，领域层声明的依赖接口）回取覆盖事故前 30s 时间窗的 VehicleStateSnapshot（见 VO-09、决策 14）。
+- 输出：EmergencyActivatedEvent（携带 GeoLocation、回取的 VehicleStateSnapshot、Driver 标识、时间戳）；告警落库时生成 AlertType=COLLISION_DISABILITY 的 SafetyAlertEvent。
+- 消费方：EmergencyRescueService（救援上报）、PermissionService（家属端自动激活）。
+
+---
+
+#### DS-07：InterventionService（干预执行服务）
+
+**职责**：接收 RiskDeterminedEvent，按风险等级生成对应的分级干预指令序列——L1 氛围灯变色提醒、L2 语音提醒 + 环境调节、L3 语音播报 + 座椅震动 + 双闪 + CAN 指令下发。负责"语音唤醒 → 建议/请求减速 → 引导靠边"的渐进式指令升级逻辑。同时监控驾驶员覆盖（override）信号，一旦检测到转向/踩踏板等有效操作即停止升级并归还控制权。
+
+**协作**：
+- 订阅 RiskDeterminedEvent 和 AlertTriggeredEvent。
+- 输出 InterventionInstruction（值对象，包含指令类型、目标设备、参数），由基础设施层翻译为具体硬件指令。
+- 与驾驶员覆盖检测（override detection）交互——覆盖信号由感知层提供，本服务决定是否中止干预升级。
+
+---
+
+#### DS-08：PermissionService（权限管理服务 — BR-07）
+
+**职责**：管理家属账户对驾驶员的访问权限。常规情形下，当驾驶员持续处于 L3 风险 >60 秒时授予"远程对讲 + 视频监控"权限；高危失能场景（BR-06 触发）下自动激活接入，不受 60 秒约束。
+
+**协作**：
+- 订阅 RiskDeterminedEvent（跟踪 L3 持续时长）。
+- 订阅 EmergencyActivatedEvent（触发自动激活）。
+- 输出 FamilyAccessGrantedEvent（携带被授权账户、驾驶员、权限范围）。
+- 权限授予结果写回 SystemAccount 聚合中的 Permission 值对象。
+
+---
+
+#### DS-09：ScoringService（驾驶评分服务 — BR-05）
+
+**职责**：按 BR-05 公式计算行程级评分：`max(0, 100 − 重度疲劳×10 − 分心×5 − 路怒×8 − 急刹/急加速×2)`，clamp 至 [0,100]。周期级评分按行程时长加权平均。当评分 < 60 时，触发绩效预警通知推送。
+
+**协作**：
+- 输入：Trip 聚合中的告警统计（重度疲劳次数、分心次数、路怒触发次数、急刹/急加速次数）。
+- 输出：TripScore 值对象（行程级）/ TripScore 值对象（周期级）。
+- 评分 < 60 时发出 PerformanceWarningEvent。
+
+---
+
+#### DS-10：FleetAnalyticsService（车队分析服务）
+
+**职责**：按车队维度聚合疲劳指数分布——正常/轻度/重度占比、风险热力图（地理位置 + 风险等级）。支持默认每 5 分钟周期刷新和手动即时刷新。支持钻取：点击某风险等级板块下钻至高风险司机明细列表。
+
+**协作**：
+- 查询多个 Trip 和 Driver 聚合的数据。
+- 输出聚合结果（纯数据，不产生副作用）。
+- 看板刷新和钻取查询由本服务提供接口，缓存和刷新策略由基础设施层支持。
+
+---
+
+#### DS-11：ReportGenerationService（报告生成服务）
+
+**职责**：按指定司机 + 时间范围（周/月/季）生成驾驶行为分析报告，含疲劳、分心、急加速、急刹车等指标的统计与趋势。报告支持导出为 PDF/Excel。须在 15 秒内完成生成。
+
+**协作**：
+- 输入：Driver 标识 + TimeRange 值对象。
+- 查询 Trip 聚合中的告警和快照数据。
+- 调用 ScoringService 获取周期评分。
+- 输出报告数据结构（由基础设施层负责 PDF/Excel 渲染）。
+
+---
+
+#### DS-12：EmergencyRescueService（应急救援服务）
+
+**职责**：SOS 自动呼叫与上报——向救援中心/120 发送精准定位、事故前 30 秒车辆状态快照、驾驶员实时生命体征。管理远程解锁授权：救援机构核实险情后云端授权开启车门锁。管理驾驶员健康档案调取：救援机构授权后可调取 DriverHealthProfile。
+
+**协作**：
+- 输入：EmergencyActivatedEvent。
+- 查询 Driver 聚合（DriverHealthProfile）、Vehicle 聚合（车门锁状态）。
+- 输出：RescueReport（值对象，包含位置、体征、快照、健康档案摘要）。
+
+---
+
+#### DS-13：PrivacyProtectionService（隐私保护服务 — BR-04）
+
+**职责**：确保 BR-04 的隐私数据边界被遵守——DMS 原始图像在边缘侧完成脱敏（人脸关键点提取/模糊化），云端仅接收脱敏后的数值特征向量；未经授权严禁原始高清视频上云。管理路怒语音存证的全生命周期：录制→加密→留存→到期清除。
+
+**协作**：
+- 在数据上云路径中作为**守门人**校验数据是否已脱敏。
+- **订阅 RiskDeterminedEvent**：当 AlertType=ROAD_RAGE 时触发路怒语音存证录制（RoadRageVoiceRecord 的创建、加密存储和保留到期时间设置）。
+- 管理 RoadRageVoiceRecord 的到期检查和自动清除。
+- 处理审计场景下的授权访问请求。
+
+---
+
+#### DS-14：SensorSelfCheckService（传感器自检服务 — BR-08）
+
+**职责**：对关键传感器（摄像头/雷达等）执行周期性自检。若发现遮挡或链路故障，在 3 秒内通过 HMI 持续语音提示"安全监测系统已失效"，并在车队大屏同步标记该车辆为"监测脱线"。
+
+**协作**：
+- 输入：传感器自检信号。
+- 输出：SensorFailureEvent（携带车辆标识、故障传感器列表、时间戳）。
+- 更新 Vehicle 聚合中的 SensorStatus。
+
+---
+
+#### DS-15：OTAUpdateService（OTA 升级管理服务）
+
+**职责**：管理车载终端固件的版本管理、升级包下发与校验、断点续传、完整性校验、失败回滚、静默升级状态机。
+
+**协作**：
+- 管理 OTAVersion 值对象的新旧版本比对。
+- 升级包的状态机（待下发 → 传输中 → 校验中 → 已就绪 → 升级中 → 完成/回滚）由本服务维护。
+- 升级完成时发出 OTAUpgradeCompletedEvent。
+
+---
+
+### 3.5 领域事件
+
+| 事件 | 触发时机 | 携带关键信息 | 主要消费方 |
+|------|----------|-------------|-----------|
+| `RiskDeterminedEvent` | RiskDeterminationService 完成一次**流式融合判定**（仅 AlertType ∈ `{FATIGUE, DISTRACTION, ROAD_RAGE}`） | Trip 标识、RiskLevel、AlertType、判定时间戳、异常特征快照 | InterventionService（所有流式类型）、PermissionService（跟踪 L3 持续时长）、PrivacyProtectionService（AlertType=ROAD_RAGE 时触发语音存证录制） |
+| `AlertTriggeredEvent` | SafetyAlertEvent 被创建 | 告警 ID、AlertType、RiskLevel、GPS、Timestamp | 通知推送模块、车队看板刷新 |
+| `LifeDetectedEvent` | **LifeDetectionService（独立事件触发型服务，不经门面汇总）** 在 60s 窗口内判定成立（AlertType=LIFE_DETECTION，独占此取值） | Vehicle 标识、判定置信度、Timestamp | 家属推送模块、车辆 HMI 控制 |
+| `EmergencyActivatedEvent` | **EmergencyResponseService（独立事件触发型服务，不经门面汇总）** 判定 BR-06 碰撞+失能条件满足（AlertType=COLLISION_DISABILITY，独占此取值） | Driver 标识、GeoLocation、VehicleStateSnapshot、Timestamp | EmergencyRescueService、PermissionService（自动激活家属端） |
+| `SensorFailureEvent` | SensorSelfCheckService 检测到关键传感器故障 | Vehicle 标识、故障传感器列表、Timestamp | 车队看板（标记脱线）、HMI 语音提示 |
+| `FamilyAccessGrantedEvent` | 家属获得对某 Driver 的访问权限（常规 60s 或自动激活） | SystemAccount 标识、Driver 标识、Permission、授权原因（常规/高危） | 家属 APP 推送、远程对讲/视频通道建立 |
+| `TripScoredEvent` | ScoringService 完成一次行程级评分 | Trip 标识、TripScore、扣分项明细 | 报告生成、趋势统计 |
+| `PerformanceWarningEvent` | 行程级或周期级评分 < 60 | Driver 标识、Score、评估周期、主要扣分项 | 管理员通知推送 |
+| `OTAUpgradeCompletedEvent` | 车载终端固件升级成功 | Vehicle 标识、旧版本、新版本、升级耗时 | 车队管理日志、版本追踪 |
+
+---
+
+## 四、关键行为契约
+
+### 场景 1：疲劳驾驶判定与干预（BR-01 + 干预链）
+
+1. 感知通道持续送入 DMS 视觉 SensorReading。
+2. RiskDeterminationService 委托 FatigueDeterminationService 按 BR-01 条件判定。
+3. 判定为轻度疲劳（L2）时：
+   - RiskDeterminationService 产出 RiskDeterminedEvent（AlertType=FATIGUE，RiskLevel=L2）。
+   - 生成 SafetyAlertEvent（AlertType=FATIGUE，RiskLevel=L2）。
+   - 发出 AlertTriggeredEvent。
+   - InterventionService 收到 RiskDeterminedEvent 后生成"氛围灯变橙提醒"指令。
+4. 判定为重度疲劳（L3）时：
+   - RiskDeterminationService 产出 RiskDeterminedEvent（AlertType=FATIGUE，RiskLevel=L3）。
+   - 生成 SafetyAlertEvent（AlertType=FATIGUE，RiskLevel=L3）。
+   - InterventionService 生成"语音播报 + 座椅强力震动"指令。
+   - 若 L3 持续超过 60 秒，PermissionService 则向关联家属授予远程对讲/视频权限（BR-07 常规路径）。
+5. 整个过程在边缘侧完成，端到端时延 ≤ 500ms（判定到指令下发）。
+
+---
+
+### 场景 2：车内活体遗留检测与报警（BR-02）
+
+1. 车辆熄火、车门落锁后，"熄火落锁"事件触发活体监测会话；毫米波雷达自动开始扫描。
+2. LifeDetectionService（独立事件触发型服务，不经 RiskDeterminationService 门面）以会话级 DetectionWindow 值对象承载 60 秒判定窗口状态，随每次雷达信号到达迭代更新窗口与判定结论（见 DS-05 设计约束）。
+3. 若窗口内持续感应到微动：
+   - 判定为"遗留生命风险"（L3，AlertType=LIFE_DETECTION）。
+   - 直接产出 LifeDetectedEvent（不与门面产生重复判定事件）。
+   - 10 秒内：家属 APP 收到红色高频振动报警；车载双闪开启、短促鸣笛。
+4. 若窗口内微动消失（存在时间 < 60s），判定取消，不触发告警（抑制误报）。
+
+---
+
+### 场景 3：路怒检测与存证（BR-03）
+
+1. 语音情绪通道检测到声压级 >85dB 且含谩骂关键词。
+2. 生理通道显示心率较静息上升 20%+。
+3. RoadRageDeterminationService 两条件同时满足时判定路怒成立（L2），**将判定结果返回給 RiskDeterminationService 门面**。
+4. RiskDeterminationService 汇总后产出 RiskDeterminedEvent（AlertType=ROAD_RAGE，RiskLevel=L2）。
+5. 领域事件驱动的后续行为：
+   - **InterventionService** 消费 RiskDeterminedEvent（AlertType=ROAD_RAGE）→ 触发车内环境调节指令：空调温度调低 2°C、播放白噪音/舒缓音乐。
+   - **PrivacyProtectionService** 消费 RiskDeterminedEvent（AlertType=ROAD_RAGE）→ 创建 RoadRageVoiceRecord，开始录制当前时段语音片段，存储于边缘侧，标记脱敏/加密，设置保留到期时间。
+6. 路怒状态解除后，RiskDeterminationService 产出后续的 RiskDeterminedEvent（风险解除），PrivacyProtectionService 消费后停止录制，存证文件封闭。
+
+---
+
+### 场景 4：碰撞事故应急响应（BR-06）
+
+1. 加速度传感器检测到碰撞特征冲击。
+2. 生理监测显示心率骤停或意识丧失（无操作反馈）>10 秒。
+3. EmergencyResponseService（独立事件触发型服务，不经 RiskDeterminationService 门面）判定 BR-06 条件成立（L3，AlertType=COLLISION_DISABILITY）：
+   - 经 VehicleStateBuffer 端口回取事故前 30 秒窗内的 VehicleStateSnapshot（该缓冲由基础设施层持续维护，见决策 14）。
+   - 直接产出 EmergencyActivatedEvent（不与门面产生重复判定事件）。
+   - 跳过人工确认，立即：向救援中心发送 GPS 坐标 + 回取的事故前 30 秒 VehicleStateSnapshot；同步 Driver 实时生理体征。
+4. PermissionService 收到 EmergencyActivatedEvent，自动激活关联家属端对讲/视频接入（无需家属手动发起）。
+5. EmergencyRescueService 处理远程解锁授权和健康档案调取。
+
+---
+
+### 场景 5：驾驶评分与绩效预警（BR-05）
+
+1. 行程结束时，Trip 聚合被标记为完成。
+2. ScoringService 查询 Trip 关联的 SafetyAlertEvent 统计：重度疲劳次数、分心次数、路怒次数、急刹/急加速次数。
+3. 按公式计算 TripScore：`max(0, 100 − A×10 − B×5 − C×8 − D×2)`，结果 clamp 至 [0,100]。
+4. 发出 TripScoredEvent。
+5. 若 TripScore < 60，发出 PerformanceWarningEvent，通知模块将绩效预警推送给关联车队管理员。
+6. 周期评分（周/月/季）由 ScoringService 按该周期内所有行程的 TripScore 按时长加权平均计算，同样 clamp 至 [0,100] 并在 < 60 时触发绩效预警。
+
+---
+
+### 场景 6：传感器故障失效保护（BR-08）
+
+1. SensorSelfCheckService 周期性对关键传感器执行自检。
+2. 若发现遮挡或链路故障：
+   - 在 3 秒内发出 SensorFailureEvent。
+   - HMI 层消费事件：持续语音提示"安全监测系统已失效，请注意驾驶安全"。
+   - 车队看板消费事件：标记该 Vehicle 为"监测脱线"。
+3. 故障恢复后再次自检通过，清除脱线标记并停止语音提示。
+
+---
+
+### 场景 7：家属常规权限授予（BR-07 常规路径）
+
+1. PermissionService 订阅 RiskDeterminedEvent，跟踪每个 Driver 的 L3 风险持续时长。
+2. 当某 Driver 的 L3 连续超过 60 秒时：
+   - 授予关联家属账户"远程对讲 + 视频监控"权限（创建新 Permission 实例，更新 SystemAccount 聚合）。
+   - 发出 FamilyAccessGrantedEvent。
+   - 家属 APP 收到事件后可发起对讲/视频接入。
+3. 驾驶员可在任何时候物理遮挡摄像头，该操作通过感知通道检测，触发权限临时撤销。
+
+---
+
+## 五、错误处理策略
+
+### 5.1 错误分类
+
+系统领域层的错误分为三类：
+
+**A 类——判定失败**：风险判定无法完成（如感知数据缺失、传感器故障导致输入不可用）。此类错误应由 SensorSelfCheckService 提前检测并发出 SensorFailureEvent，判定服务在输入不可用时返回 `None` 而非抛出异常——"无法判定"本身是一种合法的系统状态，不应打断其他正常运行的判定链路。
+
+**B 类——业务规则违反**：操作违反了业务约束（如未经授权的家属尝试调取原始视频、评分时行程尚未结束）。此类错误使用 `Result<T, Error>` 模式，调用方可显式处理业务拒绝，不抛异常。
+
+**C 类——系统级故障**：数据持久化失败、基础设施层面的异常。此类错误在领域服务中不捕获，向上抛给基础设施层统一处理（重试、降级、熔断等）。
+
+### 5.2 错误表达方式选择
+
+| 场景 | 策略 | 理由 |
+|------|------|------|
+| 感知数据缺失导致无法完成判定 | `Option<RiskDeterminedEvent>` — 返回 None | "无风险"与"无法判定"是不同的概念，None 明确表达后者，消费方据此决定是否降级处理 |
+| 家属在无授权状态下请求对讲/视频 | `Result<Unit, PermissionDenied>` | 调用方需要知道拒绝原因以生成适当的用户提示 |
+| 评分时行程尚未结束（状态错误） | `Result<TripScore, ScoringError>` | 属于逻辑错误，应阻止操作并向上反馈 |
+| 救援机构调取健康档案但未获授权 | `Result<DriverHealthProfile, AccessDenied>` | 隐私合规要求显式处理未授权访问 |
+| 活体检测 60 秒窗口内微动消失 | `Option<LifeDetectedEvent>` — 返回 None | 正常业务结果，非错误 |
+| 领域事件发布失败（outbox 模式下持久化失败） | 抛异常，由基础设施层兜底（重试 + 死信） | outbox 模式将事件持久化与聚合根状态更新置于同一事务——若事务提交失败（含事件持久化失败），则聚合根状态更新也不生效，事务回滚后由调用方重试。此为 C 类系统级故障，领域层不捕获 |
+
+### 5.3 整体原则
+
+- 领域服务对外接口优先使用 `Option<T>` 表达"可能没有结果"的语义，使用 `Result<T, E>` 表达"可能成功也可能因业务原因失败"的语义。
+- 仅在调用方错误使用 API（如传入非法参数、违反前置条件）时使用异常。
+- 领域事件的发布采用 outbox 模式：事件持久化与聚合根状态更新在同一事务中提交，事务提交成功后事件才对消费方可见。若持久化失败，事务回滚，聚合根状态不变，事件不发布——保证"状态变更"与"事件已发布"的一致性。消费方自行负责事件处理的错误与重试。
+- post-transaction 阶段的异步投递失败（outbox 表已持久化但消息代理投递失败）由基础设施层的 outbox 投递器负责重试，不属于领域层职责。
+
+---
+
+## 六、并发设计
+
+### 6.1 整体线程模型
+
+系统部署拓扑分为两个主要运行时环境：
+
+**边缘侧（车载终端）**：单机部署，核心判定链路运行在有限 CPU 资源上。感知数据采集、风险判定、HMI 干预指令生成在同一个进程中按流水线方式串行处理——保证从判定到指令下发的 500ms 端到端时延在确定的计算资源上可度量。边缘侧不承受高并发压力，重点在于**确定性实时响应**而非并发吞吐。
+
+**云端侧（华为云）**：Spring Boot 服务部署，承受车队级多车辆并发数据上报、多家属并发查询、多管理员并发看板操作。云端侧需要处理并发请求，但并发控制的重点在基础设施层（数据库连接池、缓存、消息队列），领域层本身保持无状态。
+
+### 6.2 共享状态管理策略
+
+**聚合根级别的乐观并发控制**：Trip、Driver、Vehicle 等聚合根的持久化更新采用乐观锁（版本号），避免多请求并发修改同一聚合根时产生的写冲突。冲突发生时由基础设施层重试或向调用方返回冲突错误。
+
+**边缘侧状态管理**：边缘侧的"当前行程"（活跃 Trip 聚合）是单线程写入的——一次只有一次行程，感知数据按时间序列顺序到达。因此边缘侧的 Trip 聚合不存在并发写冲突，无需加锁。
+
+**领域事件的发布与消费**：领域事件采用"先持久化事件、再异步投递"的 outbox 模式，确保事件不丢失且发布与聚合根状态更新在同一事务中。事件的消费方（如通知推送、看板刷新）异步处理，不阻塞核心判定链路。
+
+**领域事件总线的实现策略**：仓颉标准库未原生提供领域事件发布/订阅机制，需自定义实现。设计层面区分两种消费链路：
+
+- **边缘侧同步消费**：安全攸关的判定→干预链路（如 InterventionService 消费 RiskDeterminedEvent），在边缘侧采用**进程内同步回调**——门面产出事件后直接同步调用注册的消费方，确保 ≤500ms 端到端时延和断网可用性（见决策 10）。
+- **云端侧异步消费**：通知推送、看板刷新、报告生成等非实时路径，采用**outbox + 消息队列异步投递**模式，消费方独立部署，允许秒级延迟。
+
+### 6.3 并发场景的具体策略
+
+| 场景 | 策略 |
+|------|------|
+| 家属查询驾驶员当前状态 | 只读查询，无需锁，读已提交即可 |
+| 多个管理员同时刷新车队看板 | 看板数据聚合为只读查询，缓存层面控制刷新频率（5 分钟），避免重复计算 |
+| 评分计算与告警事件并发写入同一 Trip | Trip 聚合根使用乐观锁，冲突时评分计算重试 |
+| 边缘侧判定写入与云端同步上报 | 边缘侧先本地持久化再异步上报云端，上报失败不影响本地判定 |
+| 家属权限授予与撤销的并发 | 对 SystemAccount 聚合使用乐观锁，权限变更以最后一次成功写入为准 |
+
+---
+
+## 七、设计决策
+
+### 决策 1：以 Trip 而非 Driver/Vehicle 为核心聚合根
+
+**理由**：系统的核心业务——风险判定、干预执行、评分计算——全部以"一次行驶行程"为上下文发生。Trip 是感知数据、告警事件、生理快照的自然汇聚点。以 Trip 为核心聚合根使得一次行程的所有关联数据在同一事务边界内保持一致，查询也最为自然。
+
+**仓颉语言考量**：Trip 内部持有 PhysiologicalSnapshot 集合和 SafetyAlertEvent 标识集合，在仓颉中通过泛型集合类型表达。聚合根的标识使用仓颉的 `struct` 或值类型确保标识的不可变性。
+
+---
+
+### 决策 2：RiskDeterminationService 作为门面，内部委托子判定服务
+
+**理由**：疲劳、分心、路怒三类判定均由**持续到达的流式感知**（DMS 视觉、生理、语音）驱动，各有独立的判定条件和阈值（BR-01、BR-03、分心规则），若将它们全部塞入一个判定服务将导致职责过重。采用门面+委托模式——RiskDeterminationService 负责流式感知数据的路由与融合判定结果的汇总，具体的判定逻辑委托给各自的子领域服务。这既保持了对调用方（流式感知通道）的统一入口，又保证了各判定规则的独立演进。
+
+**门面委托范围（明确边界）**：本门面的委托子服务**仅限**流式融合判定的三个服务——**FatigueDeterminationService、DistractionDetectionService、RoadRageDeterminationService**。BR-02 活体遗留与 BR-06 碰撞失能**不在委托范围内**：二者是**事件触发型判定**（触发源分别为"熄火落锁"与"碰撞冲击"离散事件），与流式融合的输入模型、生命周期与产出事件均不同，被设计为独立领域服务（DS-05、DS-06），自行产出 LifeDetectedEvent / EmergencyActivatedEvent，理由详见决策 13。
+
+**仓颉语言考量**：各子判定服务的接口定义为仓颉 `interface`——这使得不同判定算法可互替换（如边缘侧使用轻量规则判定，云端使用 AI 模型判定），符合接口隔离原则。
+
+**补充约束**：作为门面委托子服务的（仅）三个流式判定服务**不得直接调用其他模块的领域服务或直接产出领域事件**——判定结果一律返回给 RiskDeterminationService 门面，由门面统一产出 RiskDeterminedEvent。跨模块协作（如路怒成立触发语音存证、环境调节）由消费方订阅 RiskDeterminedEvent 完成。这保证了模块间的松耦合和依赖方向的单向性。该约束**不适用于** DS-05/DS-06 这两个独立事件触发型服务——它们本就不是门面子服务，直接产出自身领域事件是其独立服务定位的应有之义，不与本约束冲突。
+
+---
+
+### 决策 3：SafetyAlertEvent 为实体而非值对象，但非聚合根
+
+**理由**：告警事件有独立标识（告警 ID），可在 Trip 之外被独立查询（如车队管理员查询全队告警历史），且告警有独立生命周期（可被归档、统计）。但它不是聚合根，因为每个告警都产生于一个具体的 Trip 上下文——告警的创建与 Trip 的告警列表变更应在同一事务内完成。
+
+**补充设计约束（CQRS 投影）**：聚合内实体与独立查询需求之间存在张力。采用 CQRS 风格——写侧仍通过 Trip 聚合根访问 SafetyAlertEvent 以保持事务一致性；读侧（跨行程告警查询、看板聚合）使用独立只读投影，避免穿透聚合根加载大量数据。
+
+---
+
+### 决策 4：Permission 为值对象而非实体
+
+**理由**：权限由一组可执行操作定义，修改权限意味着创建新的权限集合，而非修改原有权限的"状态"。将 Permission 设计为值对象（不可变）避免了"修改权限时可能影响正在进行的对讲会话"这类并发问题——每次授予或撤销权限都创建新的 Permission 实例，旧实例在会话结束后自然过期。
+
+---
+
+### 决策 5：BR-04 隐私保护不设计为聚合约束，而设计为领域服务
+
+**理由**：隐私保护是一个横切关注点——它跨越数据采集（DMS 脱敏）、数据上云（过滤原始图像）、语音存证（加密留存与到期清除）、数据调取（授权审计）。将它建模为单一聚合根的约束既不合理（没有哪个聚合根拥有所有这些职责），也容易遗漏。独立为 PrivacyProtectionService 领域服务，在各数据流动路径上作为守门人校验，更符合横切关注点的本质。
+
+**补充**：PrivacyProtectionService 通过消费 RiskDeterminedEvent（AlertType=ROAD_RAGE）获知路怒判定成立，从而触发语音存证录制。这种事件消费方式遵循模块间解耦原则，不产生对 `domain.risk` 模块的直接编译期依赖。
+
+---
+
+### 决策 6：路怒语音存证的生命周期归属
+
+**理由**：RoadRageVoiceRecord 的创建时机与路怒判定（BR-03）紧密耦合，其清除策略又受隐私规则约束。它设计为与 SafetyAlertEvent（路怒类型）关联的实体——但不属于 Trip 聚合（因为存证存储于边缘侧、不上云，与 Trip 的存储策略不同）。其生命周期管理由 PrivacyProtectionService 负责，通过领域事件与告警事件保持松耦合。
+
+---
+
+### 决策 7：评分模块与通知模块的耦合方式
+
+**理由**：BR-05 要求"评分 <60 时自动向管理员推送绩效预警"，这意味着评分计算模块不能仅作为纯查询接口。设计上，ScoringService 在评分完成后发出 TripScoredEvent；若评分 <60，额外发出 PerformanceWarningEvent。通知推送模块消费 PerformanceWarningEvent 完成预警推送。评分服务不直接依赖通知服务——它只产出事件、不关心谁消费，解耦程度最大化。
+
+---
+
+### 决策 8：聚合间引用一律使用标识而非对象引用
+
+**理由**：Trip 引用 Driver 和 Vehicle 时通过标识（ID）而非对象引用。这是 DDD 聚合设计的核心原则——聚合是事务一致性边界，不同聚合的事务应独立提交。使用标识引用使聚合可以独立加载和持久化，避免将多个聚合锁在同一事务中，也为未来的微服务拆分预留了清晰的边界。
+
+**仓颉语言考量**：聚合标识使用仓颉的 `struct` 类型——轻量、栈分配、不可变，适合作为跨聚合引用。
+
+---
+
+### 决策 9：使用 enum 表达有限的、稳定的分类体系
+
+**理由**：RiskLevel（L1/L2/L3）、AlertType（疲劳/分心/路怒等）、SensorStatus（在线/离线/故障）的取值集合是固定的且在系统生命周期内极少变化。使用仓颉 `enum` 可确保：编译期穷尽检查（match 表达式遗漏分支将产生编译错误）、类型安全（不会误将字符串常量当作状态值）、代码可读性。
+
+---
+
+### 决策 10：领域事件的异步消费与边缘侧的顺序性
+
+**理由**：边缘侧核心判定的端到端时延要求 ≤500ms，这意味着判定→干预链路上的事件消费不能引入不可控的异步延迟。设计上，边缘侧的 RiskDeterminedEvent → InterventionService 的消费是**同步的**（同一进程内直接调用），确保时延可控。云端侧和通知推送的事件消费才采用异步模式。这体现了"安全链路优先"的原则——牺牲通知推送的实时性（允许数秒延迟），保障判定→干预链路的确定性时延。
+
+---
+
+### 决策 11：统一感知数据抽象 SensorReading
+
+**理由**：四条感知通道（DMS 视觉、生理体征、语音情绪、毫米波雷达）的数据以自然语言分散描述于各判定服务的"输入"中，缺少统一契约。新增 SensorReading 值对象作为统一的感知数据抽象，为各判定服务提供一致的输入接口。这使感知通道的扩展（新增传感器类型）不影响判定服务的接口定义，也便于在领域事件中携带判定所依据的原始特征数据。
+
+---
+
+### 决策 12：值对象在仓颉中的首选类型形态为 struct
+
+**理由**：仓颉中 `class` 为引用类型（默认引用相等），`struct` 为值类型（值相等）。值对象的核心语义是"由属性值定义相等性"，`struct` 天然提供该保证。将值对象标注为 `struct` 可避免后续实现时误用引用相等导致的业务逻辑错误。若因具体实现约束需要使用 `class`，则必须在类型定义中显式标注"需重写相等性方法使 class 具备值相等语义"的设计约束。
+
+---
+
+### 决策 13：区分"流式融合判定门面"与"事件触发型独立判定服务"两类判定模型
+
+**理由**：系统的风险判定本质上存在两种截然不同的输入与触发模型，强行统一到一个门面会造成架构不适配：
+
+- **流式数据驱动判定**（疲劳 BR-01、分心、路怒 BR-03）：输入是 DMS 视觉/生理/语音三条**持续到达**的感知流，判定是对当前时间窗内流式特征的连续评估，多通道结果可被有意义地**融合**为单一的 RiskDeterminedEvent。此类适合门面+委托模式（决策 2）。
+- **事件触发型判定**（活体遗留 BR-02、碰撞失能 BR-06）：触发源是**离散领域事件**（熄火且落锁、碰撞冲击），判定逻辑、生命周期（如 BR-02 的 60s 窗口、BR-06 的一次性即时响应）和产出事件（LifeDetectedEvent / EmergencyActivatedEvent）都与流式融合无关，也无法被"融合"进 RiskDeterminedEvent。
+
+将后者纳入门面委托会带来两难：要么破坏决策 2"子服务不直接产出事件"的约束（如 v2 中 DS-05/DS-06 直接产出事件却又被列为子服务，构成内部矛盾），要么强行让其结果回传门面再统一产出 RiskDeterminedEvent（需扩展 AlertType 并改造触发语义，反而模糊了两种判定模型的本质差异）。**因此本设计将 BR-02、BR-06 明确为独立领域服务**：它们有独立触发条件、独立判定逻辑、独立领域事件，不经 RiskDeterminationService 门面。三类判定事件（RiskDeterminedEvent / LifeDetectedEvent / EmergencyActivatedEvent）的 AlertType 取值两两不相交（见 VO-02），从结构上杜绝重复判定事件。
+
+**仓颉语言考量**：独立判定服务与门面子服务同样以仓颉 `interface` 定义行为契约，可被 mock 替换；它们与门面同处 `domain.risk` 模块（模块归类按"风险判定"职责，而调用模型的差异属服务级设计），不引入新的跨模块依赖，依赖方向仍单向（见 §2.1）。事件触发型服务订阅其触发事件、产出自身事件，复用 §6.2 既定的事件总线实现策略，无新增语言能力诉求。
+
+---
+
+### 决策 14：事故前车辆状态的滚动缓存归属基础设施层，领域层以端口依赖
+
+**理由**：BR-06 需要在碰撞时刻回取"事故前 30 秒"的 VehicleStateSnapshot，这要求系统在碰撞**之前**就持续采集并缓存近期车辆状态。该"持续采样 + 时间窗滚动缓存"是一种**有状态的、与领域判定正交的技术职责**——若交给某个领域服务，会破坏领域服务无状态的设计基线；若塞进 Trip 聚合，又会让聚合背负高频写入的滚动缓冲、违背聚合一致性边界的初衷。
+
+因此设计上将其归属**基础设施层**：由边缘侧车辆状态采集组件按频率生成 VehicleStateSnapshot 并维护覆盖 ≥30s 的滚动缓冲（ring buffer）。领域层只声明一个依赖接口（端口）**VehicleStateBuffer**，暴露"按时间窗回取快照序列"的能力契约；EmergencyResponseService（DS-06）在碰撞时刻经此端口回取快照，自身保持无状态。此举遵循依赖倒置——领域定义契约、基础设施提供实现，使"有状态缓存"与"无状态判定"解耦，且便于在测试中以内存桩替换缓冲实现。
+
+**仓颉语言考量**：VehicleStateBuffer 以仓颉 `interface` 声明于领域层，基础设施层提供实现并在装配阶段注入 DS-06，属仓颉接口与依赖注入的标准用法，已在前序类型可行性审查范围内。
+
+---
+
+## 修订说明（v2）
+
+| 审查意见 | 修改措施 |
+|---------|---------|
+| **【一般】RoadRageDeterminationService 跨模块通信违反依赖原则**：DS-04 协作描述中直接向 PrivacyProtectionService 和 InterventionService 发送指令，违反 §2.2 "各领域服务模块之间禁止直接调用"的核心原则。 | **采纳**。在 DS-04 修订协作描述：子判定服务仅将结果返回给 RiskDeterminationService 门面，由门面统一产出 RiskDeterminedEvent（AlertType=ROAD_RAGE），PrivacyProtectionService 和 InterventionService 各自订阅该事件完成语音存证录制和环境调节。同步更新场景 3 的行为契约以反映事件中介流程。在决策 2 补充"子判定服务不得直接调用其他模块或产出事件"的约束。 |
+| **【轻微】值对象统一标注为 class 而非 struct**：PhysiologicalSnapshot 等 7 个值对象均标注 class，但仓颉中 class 为引用类型（引用相等），struct 才是值类型（值相等），与值对象语义不匹配。 | **部分采纳**。将所有纯值对象（PhysiologicalSnapshot、GeoLocation、TripScore、Permission、OTAVersion、VehicleStateSnapshot、TimeRange）的类型形态从 `class` 改为 `struct`，并在 VO-03 增加仓颉类型约束说明。新增决策 12 阐明值对象的首选类型形态与设计考量。SafetyAlertEvent 和 RoadRageVoiceRecord 维持 `class`（它们是有标识的实体而非值对象）。 |
+| **【轻微】领域事件发布/订阅机制未标注实现策略**：仓颉标准库未原生提供事件总线，但设计中大量依赖领域事件解耦。 | **采纳**。在 §6.2 新增"领域事件总线的实现策略"段，区分边缘侧同步消费（进程内回调，保障 ≤500ms 时延）与云端侧异步消费（outbox+消息队列）两种链路，使设计层面有明确的实现方向。 |
+| **【轻微】§5.1 和 §5.3 存在一致性张力**：§5.1 将"领域事件发布失败"归为 C 类抛异常，§5.3 又说"消费方自行负责错误处理"，发布方事务回滚与 outbox 兜底的一致性边界不清晰。 | **采纳**。在 §5.2 表格中重写"领域事件发布失败"条目：明确采用 outbox 模式——事件持久化与聚合根状态更新在同一事务，事务失败则两者均不生效；post-transaction 异步投递失败由基础设施层 outbox 投递器重试，非领域层职责。在 §5.3 补充 outbox 一致性保证的说明。 |
+| **【轻微】RiskDeterminedEvent 缺少 PrivacyProtectionService 消费方条目**：当前事件表中未标注 RiskDeterminedEvent 可被 PrivacyProtectionService 消费以触发语音存证录制。 | **采纳**。在 §3.5 事件表中 RiskDeterminedEvent 的"主要消费方"列增加 PrivacyProtectionService（AlertType=ROAD_RAGE 时触发语音存证录制）。 |
+| **【轻微】SafetyAlertEvent 聚合内实体与独立查询需求间的张力**：既描述为 Trip 聚合内实体，又强调可独立查询和归档。 | **采纳**。在 E-01 追加「设计约束」段：采用 CQRS 读模型投影策略——写侧通过 Trip 聚合根访问以保证事务一致性；读侧使用独立只读投影满足跨行程查询需求。决策 3 同步补充此约束。 |
+| **【轻微】LifeDetectionService 有状态设计与领域服务惯例的偏差**：DS-05 声明为"有状态"（判定窗口计时），与领域服务通常无状态的惯例有偏差。 | **采纳**。在 DS-05 追加「设计约束」段：建议后续详细设计将窗口计时状态封装为 `DetectionWindow` 值对象，使服务回归纯函数。当前在边缘侧单线程环境下可行，已在后续设计约束中标记。 |
+| **【轻微】domain.privacy 模块依赖声明缺失 domain.event**：§2.1 模块表标注 domain.privacy 仅依赖 domain.model，但 DS-13 现需消费 RiskDeterminedEvent。 | **采纳**。在 §2.1 模块表中将 domain.privacy 的依赖方向更新为"依赖 `domain.model`、`domain.event`"。 |
+| **【轻微】缺少统一的感知数据抽象**：各判定服务的"输入"以自然语言分散描述，缺少统一的 SensorReading 类型。 | **采纳**。在 §3.3 新增 VO-11 SensorReading 值对象，作为四条感知通道的统一数据抽象，为各判定服务提供一致的输入契约。在 DS-01 的输入描述中统一引用 SensorReading。新增决策 11 阐明该抽象的设计理由。 |
+
+---
+
+## 修订说明（v3）
+
+> 本轮审查结论为 **REJECTED**，核心修改要求为"问题 1"（DS-05/DS-06 事件产出路径与决策 2 门面约束矛盾）；审查另列三条【轻微】一致性意见。审查给出路径 A（独立领域服务）与路径 B（保留门面、统一 RiskDeterminedEvent）两个可选方向。**本轮采纳路径 A**：理由是 BR-02 活体遗留（熄火落锁触发）与 BR-06 碰撞失能（碰撞冲击触发）本质是**事件触发型判定**，其输入模型、生命周期与产出事件均不同于疲劳/分心/路怒的**流式融合判定**——路径 A 如实承认这一架构差异、消除矛盾，而路径 B 强行让其回流门面会模糊两种判定模型的本质区别并需扩展 AlertType、改造触发语义，代价更大且不自然。
+
+| 审查意见 | 修改措施 |
+|---------|---------|
+| **【一般 / REJECTED 问题 1】LifeDetectionService 与 EmergencyResponseService 的事件产出路径与决策 2 门面约束矛盾**：DS-05/DS-06 直接产出 LifeDetectedEvent/EmergencyActivatedEvent，却又被 DS-01 列为门面委托子服务，违反"子服务不直接产出事件"的决策 2 核心约束；场景 2/4 也未体现门面参与，构成内部矛盾。 | **采纳（路径 A）**。将 DS-05、DS-06 明确为**独立事件触发型领域服务**，从 RiskDeterminationService 门面的委托列表中**移除**——DS-01 职责与协作改述为"流式感知融合判定门面"，委托子服务仅保留 FatigueDeterminationService、DistractionDetectionService、RoadRageDeterminationService；RiskDeterminedEvent 的 AlertType 限定为 `{FATIGUE, DISTRACTION, ROAD_RAGE}`。同步改写 DS-05、DS-06 标题与正文标注其独立服务定位与直接产出事件的合理性；改写决策 2 的门面委托范围与约束适用边界；新增**决策 13** 系统阐述"流式融合门面 vs 事件触发型独立服务"两类判定模型的划分理由。§2.1 `domain.risk` 模块职责更新为含两类调用模型。 |
+| **【轻微】DS-05 判定窗口的状态管理边界模糊**：未明确 60s 倒计时是服务内部 mutable 字段还是输入参数的一部分，影响可测试性判断。 | **采纳**。在 DS-05「设计约束」明确：将判定窗口建模为**会话级 `DetectionWindow` 值对象**，由活体监测会话上下文持有，每次雷达信号到达时作为**输入参数**传入、由服务返回更新后的 DetectionWindow 与判定结论；服务对外仍是纯函数，可变状态归会话上下文而非服务内部字段。场景 2 行为契约同步体现。 |
+| **【轻微】LifeDetectedEvent 触发时机与 DS-01 汇总位置形成模糊地带**：可能出现同一判定产出 LifeDetectedEvent + AlertType=LIFE_DETECTION 的 RiskDeterminedEvent 两条事件。 | **采纳（随路径 A 一并消解）**。在 VO-02 新增「取值来源边界」说明：三类判定事件（RiskDeterminedEvent / LifeDetectedEvent / EmergencyActivatedEvent）的 AlertType 取值**两两不相交**——LIFE_DETECTION 仅由 LifeDetectedEvent 承载、COLLISION_DISABILITY 仅由 EmergencyActivatedEvent 承载，RiskDeterminedEvent 不含此二者，从结构上杜绝重复判定事件。§3.5 事件表对三事件的触发时机与独占 AlertType 一并标注。 |
+| **【轻微】VehicleStateSnapshot（VO-09）的生产者不明确**：BR-06 需"事故前 30 秒车辆状态快照"，意味着碰撞前须持续缓存车辆状态，但未说明由谁采集/缓存/回取。 | **采纳**。在 VO-09 新增「生产者与缓存归属」说明，并新增**决策 14**：明确"持续采样 + 30s 滚动缓存"为**基础设施层**职责（边缘侧采集组件维护 ring buffer），领域层仅声明依赖接口（端口）**VehicleStateBuffer**；EmergencyResponseService（DS-06）在碰撞时刻经此端口回取快照，自身保持无状态。DS-06 协作与场景 4 行为契约同步体现快照回取路径。 |
+
+> **关于审查意见的独立判断**：本轮四条意见全部采纳，无分歧。审查 §1~§3、§5 各维度此前均判"通过"，本轮修改限于设计一致性层面的结构调整（服务调用模型的重新归类、事件 AlertType 取值边界的明确、有状态缓存职责的归属），未引入任何新的仓颉语言能力诉求——独立判定服务、端口接口、事件订阅均沿用前序已通过类型可行性审查的 `interface`/`enum`/事件总线形态，故未触及类型系统、标准库与并发模型的既有结论。
+
+---
+
+DESIGN_WRITTEN:D:\软件测试\redeliberations\202606281504_vehicle-safety-ood\a_v1_design_v3.md
+主Agent请勿阅读产出文件内容，直接将路径转发给相关方。
