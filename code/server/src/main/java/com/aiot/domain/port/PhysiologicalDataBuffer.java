@@ -24,8 +24,8 @@ public interface PhysiologicalDataBuffer {
      * @param tripId 当前活跃行程标识
      * @param window 回取时间窗（碰撞前至碰撞后 ≥10s）
      * @return 时间窗内按时序排列的生理快照列表
-     * @throws VehicleStateBuffer.BufferException 缓冲异常
+     * @throws BufferException 缓冲异常
      */
     List<PhysiologicalSnapshot> getReadings(TripId tripId, TimeRange window)
-            throws VehicleStateBuffer.BufferException;
+            throws BufferException;
 }
