@@ -4,7 +4,7 @@
 > 
 > **课程作业定位**：全部采用本地免费替代方案，不依赖华为云付费服务（IoTDA 除外，已有）。
 >
-> **任务进度**：0.1~0.4 ✅，1.5 ✅，1.6 ✅，前端 DTO ✅，下一项 0.5 / 1.1
+> **任务进度**：0.1~0.4 ✅，1.4~1.6 ✅，3.3 ✅，前端 DTO ✅，下一项 0.5 / 1.1 / 1.7
 
 ---
 
@@ -197,9 +197,10 @@
   - 5 个仓储接口的 JDBC/SQLite 实现（边缘侧 `infra.edge.repository`）
   - 自定义 JPQL/原生 SQL 查询
 
-- [ ] **3.3 事件总线实现**（`infra.eventbus`）
-  - 统一使用 Spring `ApplicationEventPublisher` + `@EventListener` / `@TransactionalEventListener`
-  - 同步事件（边缘侧）与异步事件（云端侧）均基于 Spring 内置机制
+- [x] **3.3 事件总线实现**（`infra.eventbus`）
+  - CloudEventBus（云端 outbox 模式）+ EdgeEventBus（边缘同步模式）✅
+  - Outbox 持久化 + 定时投递 + 指数退避重试 + 死信队列 ✅
+  - 5 个单元测试覆盖全部组件 ✅
   - ~~DMS Kafka / Outbox 投递~~ → **课程作业无需，Spring 内置事件完全够用**
 
 - [ ] **3.4 缓存**（`infra.cache`）
