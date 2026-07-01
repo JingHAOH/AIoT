@@ -1,48 +1,20 @@
-package com.aiot.infra.persistence;
+package com.aiot.domain.model;
 
-import jakarta.persistence.*;
 import java.time.LocalDateTime;
 
-@Entity
-@Table(name = "t_trip")
-public class TripJpaEntity {
-
-    @Id
-    @Column(name = "trip_id", length = 36)
+public class Trip {
     private String tripId;
-
-    @Version
-    private Integer version;
-
-    @Column(nullable = false, length = 36)
     private String driverId;
-
-    @Column(nullable = false, length = 36)
     private String vehicleId;
-
-    @Column(nullable = false)
     private LocalDateTime startedAt;
-
     private LocalDateTime endedAt;
-
     private Integer hardBrakingCount;
-
     private Integer hardAccelerationCount;
-
     private Integer scoreValue;
-
-    @Column(nullable = false, updatable = false)
     private LocalDateTime createdAt;
-
-    @Column(nullable = false)
-    private LocalDateTime updatedAt;
-
-    @PrePersist void onCreate() { createdAt = updatedAt = LocalDateTime.now(); }
-    @PreUpdate void onUpdate() { updatedAt = LocalDateTime.now(); }
 
     public String getTripId() { return tripId; }
     public void setTripId(String tripId) { this.tripId = tripId; }
-    public Integer getVersion() { return version; }
     public String getDriverId() { return driverId; }
     public void setDriverId(String driverId) { this.driverId = driverId; }
     public String getVehicleId() { return vehicleId; }
@@ -58,5 +30,5 @@ public class TripJpaEntity {
     public Integer getScoreValue() { return scoreValue; }
     public void setScoreValue(Integer scoreValue) { this.scoreValue = scoreValue; }
     public LocalDateTime getCreatedAt() { return createdAt; }
-    public LocalDateTime getUpdatedAt() { return updatedAt; }
+    public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
 }

@@ -1,7 +1,7 @@
 package com.aiot.interfaces.rest;
 
-import com.aiot.infra.persistence.DriverJpaEntity;
-import com.aiot.infra.repository.DriverJpaRepository;
+import com.aiot.application.DriverApplicationService;
+import com.aiot.domain.model.Driver;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -12,36 +12,35 @@ import java.util.UUID;
 @RequestMapping("/api/v1/driver")
 public class DriverController {
 
-    private final DriverJpaRepository driverRepo;
+    private final DriverApplicationService driverService;
 
-    public DriverController(DriverJpaRepository driverRepo) {
-        this.driverRepo = driverRepo;
+    public DriverController(DriverApplicationService driverService) {
+        this.driverService = driverService;
     }
 
     @GetMapping("/list")
-    public List<DriverJpaEntity> list(@RequestParam(required = false) String name) {
-        if (name != null && !name.isEmpty()) {
-            return driverRepo.findByNameLike(name);
-        }
-        return driverRepo.findAll();
+    public List<Driver> list(@RequestParam(required = false) String name) {
+        return driverService.list(name);
     }
 
     @PostMapping
-    public DriverJpaEntity add(@RequestBody DriverJpaEntity driver) {
+    public Driver add(@RequestBody Driver driver) {
         if (driver.getDriverId() == null || driver.getDriverId().isEmpty()) {
             driver.setDriverId(UUID.randomUUID().toString());
         }
-        return driverRepo.save(driver);
+        driverService.add(driver);
+        return driver;
     }
 
     @PutMapping
-    public DriverJpaEntity update(@RequestBody DriverJpaEntity driver) {
-        return driverRepo.save(driver);
+    public Driver update(@RequestBody Driver driver) {
+        driverService.update(driver);
+        return driver;
     }
 
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> delete(@PathVariable String id) {
-        driverRepo.deleteById(id);
+        driverService.delete(id);
         return ResponseEntity.noContent().build();
     }
 }

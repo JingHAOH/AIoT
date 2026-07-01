@@ -1,6 +1,5 @@
--- ============================================
--- V1: Flyway 基线，确保 Flyway 元数据表创建
--- ============================================
--- 此文件作为 Flyway 迁移基线，不执行任何 DDL
--- 实际建表逻辑从 V2 开始
-SELECT 1;
+CREATE TABLE IF NOT EXISTS flyway_baseline (
+    id INT PRIMARY KEY,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO flyway_baseline VALUES (1, CURRENT_TIMESTAMP);

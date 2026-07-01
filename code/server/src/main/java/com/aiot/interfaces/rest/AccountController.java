@@ -1,7 +1,7 @@
 package com.aiot.interfaces.rest;
 
-import com.aiot.infra.persistence.SystemAccountJpaEntity;
-import com.aiot.infra.repository.SystemAccountJpaRepository;
+import com.aiot.domain.model.SystemAccount;
+import com.aiot.domain.repository.SystemAccountRepository;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -10,19 +10,19 @@ import java.util.List;
 @RequestMapping("/api/v1/account")
 public class AccountController {
 
-    private final SystemAccountJpaRepository accountRepo;
+    private final SystemAccountRepository accountRepository;
 
-    public AccountController(SystemAccountJpaRepository accountRepo) {
-        this.accountRepo = accountRepo;
+    public AccountController(SystemAccountRepository accountRepository) {
+        this.accountRepository = accountRepository;
     }
 
     @GetMapping("/list")
-    public List<SystemAccountJpaEntity> list() {
-        return accountRepo.findAll();
+    public List<SystemAccount> list() {
+        return accountRepository.findAll();
     }
 
     @GetMapping("/{phone}")
-    public SystemAccountJpaEntity findByPhone(@PathVariable String phone) {
-        return accountRepo.findByPhone(phone).orElse(null);
+    public SystemAccount findByPhone(@PathVariable String phone) {
+        return accountRepository.findByPhone(phone).orElse(null);
     }
 }

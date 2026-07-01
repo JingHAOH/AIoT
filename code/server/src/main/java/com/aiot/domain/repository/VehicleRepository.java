@@ -1,25 +1,15 @@
 package com.aiot.domain.repository;
 
-import com.aiot.domain.shared.AggregateId;
+import com.aiot.domain.model.Vehicle;
 
 import java.util.List;
 import java.util.Optional;
 
 public interface VehicleRepository {
-    VehicleRepository save(Vehicle vehicle);
-    Optional<Vehicle> findById(AggregateId id);
+    void save(Vehicle vehicle);
+    Optional<Vehicle> findById(String id);
     List<Vehicle> findByFleetId(String fleetId);
     List<Vehicle> findByLicensePlateLike(String keyword);
     List<Vehicle> findAll();
-    void delete(AggregateId id);
-
-    interface Vehicle {
-        AggregateId getId();
-        String getLicensePlate();
-        String getVin();
-        String getTerminalSn();
-        String getFleetId();
-        String getFirmwareVersion();
-        String getSensorStatus();
-    }
+    void delete(String id);
 }

@@ -1,20 +1,14 @@
 package com.aiot.domain.repository;
 
-import com.aiot.domain.shared.AggregateId;
+import com.aiot.domain.model.SystemAccount;
 
 import java.util.List;
 import java.util.Optional;
 
 public interface SystemAccountRepository {
-    SystemAccountRepository save(SystemAccount account);
-    Optional<SystemAccount> findById(AggregateId id);
+    void save(SystemAccount account);
+    Optional<SystemAccount> findById(String id);
     Optional<SystemAccount> findByPhone(String phone);
     List<SystemAccount> findAll();
-    void delete(AggregateId id);
-
-    interface SystemAccount {
-        AggregateId getId();
-        String getPhone();
-        String getRole();
-    }
+    void delete(String id);
 }

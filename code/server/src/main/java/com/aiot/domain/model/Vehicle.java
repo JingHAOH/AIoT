@@ -1,49 +1,19 @@
-package com.aiot.infra.persistence;
+package com.aiot.domain.model;
 
-import jakarta.persistence.*;
 import java.time.LocalDateTime;
 
-@Entity
-@Table(name = "t_vehicle")
-public class VehicleJpaEntity {
-
-    @Id
-    @Column(name = "vehicle_id", length = 36)
+public class Vehicle {
     private String vehicleId;
-
-    @Version
-    private Integer version;
-
-    @Column(nullable = false, length = 32)
     private String licensePlate;
-
-    @Column(nullable = false, length = 64)
     private String vin;
-
-    @Column(nullable = false, length = 64)
     private String terminalSn;
-
-    @Column(length = 64)
     private String fleetId;
-
-    @Column(length = 64)
     private String firmwareVersion;
-
-    @Column(length = 32)
     private String sensorStatus;
-
-    @Column(nullable = false, updatable = false)
     private LocalDateTime createdAt;
-
-    @Column(nullable = false)
-    private LocalDateTime updatedAt;
-
-    @PrePersist void onCreate() { createdAt = updatedAt = LocalDateTime.now(); }
-    @PreUpdate void onUpdate() { updatedAt = LocalDateTime.now(); }
 
     public String getVehicleId() { return vehicleId; }
     public void setVehicleId(String vehicleId) { this.vehicleId = vehicleId; }
-    public Integer getVersion() { return version; }
     public String getLicensePlate() { return licensePlate; }
     public void setLicensePlate(String licensePlate) { this.licensePlate = licensePlate; }
     public String getVin() { return vin; }
@@ -57,5 +27,5 @@ public class VehicleJpaEntity {
     public String getSensorStatus() { return sensorStatus; }
     public void setSensorStatus(String sensorStatus) { this.sensorStatus = sensorStatus; }
     public LocalDateTime getCreatedAt() { return createdAt; }
-    public LocalDateTime getUpdatedAt() { return updatedAt; }
+    public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
 }
